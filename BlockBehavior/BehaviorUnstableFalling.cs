@@ -11,7 +11,6 @@ using Vintagestory.API.Util;
 
 namespace Vintagestory.GameContent
 {
-
     /// <summary>
     /// Spawns an EntityBlockFalling when the user places a block that has air underneath it or if a neighbor block is
     /// removed and causes air to be underneath it. Also has optional functionality to prevent a block being placed if it is unstable.
@@ -21,8 +20,8 @@ namespace Vintagestory.GameContent
     [AddDocumentationProperty("AttachableFaces", "The faces that this block could be attached from which will prevent it from falling.", "System.String[]", "Optional", "None")]
     [AddDocumentationProperty("AttachmentAreas", "A list of attachment areas per face that determine what blocks can be attached to.", "System.Collections.Generic.Dictionary{System.String,Vintagestory.API.Datastructures.RotatableCube}", "Optional", "None")]
     [AddDocumentationProperty("AttachmentArea", "A single attachment area that determine what blocks can be attached to. Used if AttachmentAreas is not supplied.", "Vintagestory.API.Mathtools.Cuboidi", "Optional", "None")]
-    [AddDocumentationProperty("AllowUnstablePlacement","Can this block be placed in an unstable position?","System.Boolean","Optional","False",true)]
-    [AddDocumentationProperty("IgnorePlaceTest","(Obsolete) Please use the AllowUnstablePlacement attribute instead.","System.Boolean","Obsolete","",false)]
+    [AddDocumentationProperty("AllowUnstablePlacement", "Can this block be placed in an unstable position?", "System.Boolean", "Optional", "False", true)]
+    [AddDocumentationProperty("IgnorePlaceTest", "(Obsolete) Please use the AllowUnstablePlacement attribute instead.", "System.Boolean", "Obsolete", "", false)]
     public class BlockBehaviorUnstableFalling : BlockBehavior
     {
         /// <summary>
@@ -71,6 +70,12 @@ namespace Vintagestory.GameContent
         /// </summary>
         BlockFacing[] attachableFaces;
 
+        /// <summary>
+        /// Alternate block to spawn as falling block entity. Useful if the block changes after falling.
+        /// </summary>
+        [DocumentAsJson("Optional", "None")]
+        AssetLocation variantAfterFalling;
+
         public BlockBehaviorUnstableFalling(Block block) : base(block)
         {
         }
@@ -91,7 +96,7 @@ namespace Vintagestory.GameContent
                     attachableFaces[i] = BlockFacing.FromCode(faces[i]);
                 }
             }
-            
+
             var areas = properties["attachmentAreas"].AsObject<Dictionary<string, RotatableCube>>(null);
             attachmentAreas = new Cuboidi[6];
             if (areas != null)
@@ -102,7 +107,8 @@ namespace Vintagestory.GameContent
                     BlockFacing face = BlockFacing.FromFirstLetter(val.Key[0]);
                     attachmentAreas[face.Index] = val.Value.RotatedCopy().ConvertToCuboidi();
                 }
-            } else
+            }
+            else
             {
                 attachmentAreas[4] = properties["attachmentArea"].AsObject<Cuboidi>(null);
             }
@@ -119,6 +125,12 @@ namespace Vintagestory.GameContent
             }
 
             impactDamageMul = properties["impactDamageMul"].AsFloat(1f);
+
+            string variantCode = properties["variantAfterFalling"].AsString(null);
+            if (variantCode != null)
+            {
+                variantAfterFalling = AssetLocation.Create(variantCode, block.Code.Domain);
+            }
         }
 
         public override bool CanPlaceBlock(IWorldAccessor world, IPlayer byPlayer, BlockSelection blockSel, ref EnumHandling handling, ref string failureCode)
@@ -165,88 +177,33 @@ namespace Vintagestory.GameContent
 
             ICoreServerAPI sapi = (world as IServerWorldAccessor).Api as ICoreServerAPI;
             if (!sapi.World.Config.GetBool("allowFallingBlocks")) return false;
-             
+
             if (IsReplacableBeneath(world, pos) || (fallSideways && world.Rand.NextDouble() < fallSidewaysChance && IsReplacableBeneathAndSideways(world, pos)))
             {
                 BlockPos ourPos = pos.Copy();
                 // Must run a frame later. This method is called from OnBlockPlaced, but at this point - if this is a freshly settled falling block, then the BE does not have its full data yet (because EntityBlockFalling makes a SetBlock, then only calls FromTreeAttributes on the BE
-                sapi.Event.EnqueueMainThreadTask(()=>{
-                    var block = world.BlockAccessor.GetBlock(ourPos);
-                    if (this.block != block) return; // Block was already removed
-
-                    // Prevents duplication
-                    Entity entity = world.GetNearestEntity(ourPos.ToVec3d().Add(0.5, 0.5, 0.5), 1, 1.5f, (e) =>
-                    {
-                        return e is EntityBlockFalling ebf && ebf.initialPos.Equals(ourPos);
-                    });
-                    if (entity != null) return;
-
-                    var be = world.BlockAccessor.GetBlockEntity(ourPos);
-                    EntityBlockFalling entityBf = new EntityBlockFalling(block, be, ourPos, fallSound, impactDamageMul, true, dustIntensity);
-
-                    world.SpawnEntity(entityBf);
-                }, "falling");
-
-                handling = EnumHandling.PreventSubsequent;
-                return true;
-            }
-
-            handling = EnumHandling.PassThrough;
-            return false;
-        }
-
-
-        public virtual bool IsAttached(IBlockAccessor blockAccessor, BlockPos pos)
-        {
-            BlockPos tmpPos;
-
-            if (attachableFaces == null)    // shorter code path for no attachableFaces specified (common case) - we test only the block below
-            {
-                tmpPos = pos.DownCopy();
-                Block block = blockAccessor.GetBlock(tmpPos);
-                return block.CanAttachBlockAt(blockAccessor, this.block, tmpPos, BlockFacing.UP, attachmentAreas[5]);
-            }
-
-            tmpPos = new BlockPos();
-            for (int i = 0; i < attachableFaces.Length; i++)
-            {
-                BlockFacing face = attachableFaces[i];
-
-                tmpPos.Set(pos).Add(face);
-                Block block = blockAccessor.GetBlock(tmpPos);
-                if (block.CanAttachBlockAt(blockAccessor, this.block, tmpPos, face.Opposite, attachmentAreas[face.Index]))
+                sapi.Event.EnqueueMainThreadTask(() =>
                 {
-                    return true;
-                }
-            }
+                var currentBlock = world.BlockAccessor.GetBlock(ourPos);
+                if (this.block != currentBlock) return; // Block was already removed
 
-            return false;
-        }
-
-        private bool IsReplacableBeneathAndSideways(IWorldAccessor world, BlockPos pos)
-        {
-            for (int i = 0; i < 4; i++)
-            {
-                BlockFacing facing = BlockFacing.HORIZONTALS[i];
-
-                Block nBlock = world.BlockAccessor.GetBlockOrNull(pos.X + facing.Normali.X, pos.Y + facing.Normali.Y, pos.Z + facing.Normali.Z);
-                if (nBlock != null && nBlock.Replaceable >= 6000)
+                // Prevents duplication
+                Entity entity = world.GetNearestEntity(ourPos.ToVec3d().Add(0.5, 0.5, 0.5), 1, 1.5f, (e) =>
                 {
-                    nBlock = world.BlockAccessor.GetBlockOrNull(pos.X + facing.Normali.X, pos.Y + facing.Normali.Y - 1, pos.Z + facing.Normali.Z);
-                    if (nBlock != null && nBlock.Replaceable >= 6000)
+                    return e is EntityBlockFalling ebf && ebf.initialPos.Equals(ourPos);
+                });
+                if (entity != null) return;
+
+                var be = world.BlockAccessor.GetBlockEntity(ourPos);
+
+                Block fallingBlock = this.block;
+                if (variantAfterFalling != null)
+                {
+                    Block altBlock = world.BlockAccessor.GetBlock(variantAfterFalling);
+                    if (altBlock != null && altBlock.Id != 0)
                     {
-                        return true;
+                        fallingBlock = altBlock;
                     }
                 }
-            }
 
-            return false;
-        }
-
-        private bool IsReplacableBeneath(IWorldAccessor world, BlockPos pos)
-        {
-            Block bottomBlock = world.BlockAccessor.GetBlockBelow(pos);
-            return bottomBlock.Replaceable > 6000;
-        }
-    }
-}
+                EntityBlockF
